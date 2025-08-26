@@ -16,4 +16,9 @@ flask-migrate==4.0.5
 requests==2.31.0
 python-dateutil==2.8.2
 eventlet==0.33.3
-werkzeug==2.3.7 
+werkzeug==2.3.7
+# MongoDB dependencies
+pymongo==4.6.0
+flask-pymongo==2.3.0
+mongoengine==0.27.0
+bson==0.5.10
