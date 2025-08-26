@@ -7,11 +7,12 @@ import json
 from flask_socketio import emit
 
 class MedicationReminder:
-    def __init__(self, socketio=None, db=None):
+    def __init__(self, socketio=None, db=None, app=None):
         self.reminder_thread = None
         self.is_running = False
         self.socketio = socketio
         self.db = db
+        self.app = app  # Store Flask app instance for context
         self.active_reminders = {}  # Store active reminders by user_id
     
     def setup_reminders_for_user(self, medication, user_id):
@@ -47,19 +48,20 @@ class MedicationReminder:
 
     def _check_and_send_reminders(self):
         """Check for due reminders and send alerts"""
-        if not self.db:
+        if not self.db or not self.app:
             return
 
         try:
-            # Import here to avoid circular imports
-            from app import Medication, Reminder, User
+            # Use Flask application context
+            with self.app.app_context():
+                # Import here to avoid circular imports
+                from app import Medication, Reminder, User
 
-            current_time = datetime.now()
-            current_time_str = current_time.strftime('%H:%M')
+                current_time = datetime.now()
+                current_time_str = current_time.strftime('%H:%M')
 
-            # Get all active reminders that are due now (within 1 minute)
-            with self.db.session() as session:
-                due_reminders = session.query(Reminder).join(Medication).join(User).filter(
+                # Get all active reminders that are due now (within 1 minute)
+                due_reminders = self.db.session.query(Reminder).join(Medication).join(User).filter(
                     Reminder.is_active == True,
                     Medication.is_active == True,
                     User.is_active == True
@@ -104,32 +106,34 @@ class MedicationReminder:
     def _send_reminder_alert(self, reminder):
         """Send reminder alert to user"""
         try:
-            # Update last_taken to prevent duplicate alerts
-            reminder.last_taken = datetime.now()
-            self.db.session.commit()
+            # Use Flask application context for database operations
+            with self.app.app_context():
+                # Update last_taken to prevent duplicate alerts
+                reminder.last_taken = datetime.now()
+                self.db.session.commit()
 
-            # Prepare reminder data
-            alert_data = {
-                'type': 'medication_reminder',
-                'medication_id': reminder.medication_id,
-                'medication_name': reminder.medication.name,
-                'dosage': reminder.medication.dosage,
-                'frequency': reminder.medication.frequency,
-                'time': reminder.time.strftime('%H:%M'),
-                'instructions': reminder.medication.instructions or '',
-                'timestamp': datetime.now().isoformat()
-            }
+                # Prepare reminder data
+                alert_data = {
+                    'type': 'medication_reminder',
+                    'medication_id': reminder.medication_id,
+                    'medication_name': reminder.medication.name,
+                    'dosage': reminder.medication.dosage,
+                    'frequency': reminder.medication.frequency,
+                    'time': reminder.time.strftime('%H:%M'),
+                    'instructions': reminder.medication.instructions or '',
+                    'timestamp': datetime.now().isoformat()
+                }
 
-            # Send WebSocket notification
-            if self.socketio:
-                self.socketio.emit('medication_reminder', alert_data, room=f'user_{reminder.user_id}')
-                print(f"🔔 Sent reminder for {reminder.medication.name} to user {reminder.user_id}")
+                # Send WebSocket notification
+                if self.socketio:
+                    self.socketio.emit('medication_reminder', alert_data, room=f'user_{reminder.user_id}')
+                    print(f"🔔 Sent reminder for {reminder.medication.name} to user {reminder.user_id}")
 
-            # Store in active reminders for frontend polling
-            if reminder.user_id not in self.active_reminders:
-                self.active_reminders[reminder.user_id] = []
+                # Store in active reminders for frontend polling
+                if reminder.user_id not in self.active_reminders:
+                    self.active_reminders[reminder.user_id] = []
 
-            self.active_reminders[reminder.user_id].append(alert_data)
+                self.active_reminders[reminder.user_id].append(alert_data)
 
         except Exception as e:
             print(f"❌ Error sending reminder: {e}")

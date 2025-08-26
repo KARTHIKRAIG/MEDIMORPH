@@ -38,7 +38,7 @@ login_manager.login_message = 'Please log in to access this page.'
 # Initialize AI components
 ocr_processor = PrescriptionOCR()
 ai_processor = AIProcessor()
-reminder_system = MedicationReminder(socketio=socketio, db=db)
+reminder_system = MedicationReminder(socketio=socketio, db=db, app=app)
 
 # Database Models
 class User(UserMixin, db.Model):
@@ -390,32 +390,89 @@ def upload_prescription():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-@app.route('/medications', methods=['GET'])
+@app.route('/medications', methods=['GET', 'POST'])
 @login_required
-def get_medications():
-    try:
-        print(f"Getting medications for user {current_user.id} ({current_user.username})")
-        medications = Medication.query.filter_by(user_id=current_user.id, is_active=True).all()
-        print(f"Found {len(medications)} medications for user {current_user.id}")
-        for med in medications:
-            print(f"  - {med.name}: {med.dosage}, {med.frequency}")
+def medications():
+    if request.method == 'POST':
+        # Handle adding new medication manually
+        try:
+            data = request.json
+            print(f"Adding new medication for user {current_user.id}: {data}")
 
-        result = [{
-            'id': med.id,
-            'name': med.name,
-            'dosage': med.dosage,
-            'frequency': med.frequency,
-            'duration': med.duration,
-            'instructions': med.instructions,
-            'start_date': med.start_date.isoformat(),
-            'end_date': med.end_date.isoformat() if med.end_date else None
-        } for med in medications]
+            # Validate required fields
+            if not data.get('name'):
+                return jsonify({'error': 'Medication name is required'}), 400
 
-        print(f"Returning {len(result)} medications")
-        return jsonify(result)
-    except Exception as e:
-        print(f"Error in get_medications: {str(e)}")
-        return jsonify({'error': str(e)}), 500
+            # Check if medication already exists for this user
+            existing = Medication.query.filter_by(
+                user_id=current_user.id,
+                name=data['name'],
+                is_active=True
+            ).first()
+
+            if existing:
+                return jsonify({'error': 'Medication already exists'}), 409
+
+            # Create new medication
+            medication = Medication(
+                user_id=current_user.id,
+                name=data['name'],
+                dosage=data.get('dosage', ''),
+                frequency=data.get('frequency', ''),
+                instructions=data.get('instructions', ''),
+                duration=data.get('duration', ''),
+                start_date=datetime.utcnow(),
+                end_date=None
+            )
+
+            db.session.add(medication)
+            db.session.commit()
+
+            print(f"✅ Successfully added medication: {medication.name}")
+
+            return jsonify({
+                'success': True,
+                'message': 'Medication added successfully',
+                'medication': {
+                    'id': medication.id,
+                    'name': medication.name,
+                    'dosage': medication.dosage,
+                    'frequency': medication.frequency,
+                    'instructions': medication.instructions,
+                    'duration': medication.duration
+                }
+            }), 201
+
+        except Exception as e:
+            db.session.rollback()
+            print(f"❌ Error adding medication: {str(e)}")
+            return jsonify({'error': str(e)}), 500
+
+    else:
+        # Handle GET request - return all medications
+        try:
+            print(f"Getting medications for user {current_user.id} ({current_user.username})")
+            medications = Medication.query.filter_by(user_id=current_user.id, is_active=True).all()
+            print(f"Found {len(medications)} medications for user {current_user.id}")
+            for med in medications:
+                print(f"  - {med.name}: {med.dosage}, {med.frequency}")
+
+            result = [{
+                'id': med.id,
+                'name': med.name,
+                'dosage': med.dosage,
+                'frequency': med.frequency,
+                'duration': med.duration,
+                'instructions': med.instructions,
+                'start_date': med.start_date.isoformat(),
+                'end_date': med.end_date.isoformat() if med.end_date else None
+            } for med in medications]
+
+            print(f"Returning {len(result)} medications")
+            return jsonify(result)
+        except Exception as e:
+            print(f"Error in get_medications: {str(e)}")
+            return jsonify({'error': str(e)}), 500
 
 @app.route('/medications/<int:medication_id>', methods=['PUT'])
 @login_required
@@ -599,6 +656,46 @@ def user_profile():
 @app.route('/health')
 def health_check():
     return jsonify({'status': 'healthy', 'timestamp': datetime.utcnow().isoformat()})
+
+@app.route('/database-status')
+def database_status():
+    """Check database status and statistics"""
+    try:
+        with app.app_context():
+            # Get database statistics
+            user_count = User.query.count()
+            medication_count = Medication.query.count()
+            reminder_count = Reminder.query.count()
+            log_count = MedicationLog.query.count()
+
+            # Check database file
+            import os
+            db_path = 'instance/medications.db'
+            db_exists = os.path.exists(db_path)
+            db_size = os.path.getsize(db_path) if db_exists else 0
+
+            return jsonify({
+                'status': 'connected',
+                'database_file': {
+                    'path': db_path,
+                    'exists': db_exists,
+                    'size_bytes': db_size,
+                    'size_mb': round(db_size / (1024 * 1024), 2)
+                },
+                'statistics': {
+                    'users': user_count,
+                    'medications': medication_count,
+                    'reminders': reminder_count,
+                    'medication_logs': log_count
+                },
+                'timestamp': datetime.now().isoformat()
+            })
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'error': str(e),
+            'timestamp': datetime.now().isoformat()
+        }), 500
 
 @app.route('/api/user-info')
 @login_required
@@ -964,22 +1061,93 @@ def background_reminder_check():
             print(f"Error in background reminder check: {e}")
             time.sleep(60)
 
+def initialize_database():
+    """Initialize database with tables and default data"""
+    try:
+        print("🗄️ Initializing database...")
+
+        # Create all tables
+        db.create_all()
+        print("✅ Database tables created successfully")
+
+        # Create default users if they don't exist
+        default_users = [
+            {
+                'username': 'testuser',
+                'email': 'testuser@example.com',
+                'password': 'testpass123',
+                'first_name': 'Test',
+                'last_name': 'User'
+            },
+            {
+                'username': 'karthikrai390@gmail.com',
+                'email': 'karthikrai390@gmail.com',
+                'password': '123456',
+                'first_name': 'Karthik',
+                'last_name': 'Rai'
+            }
+        ]
+
+        for user_data in default_users:
+            if not User.query.filter_by(username=user_data['username']).first():
+                user = User(
+                    username=user_data['username'],
+                    email=user_data['email'],
+                    password_hash=generate_password_hash(user_data['password']),
+                    first_name=user_data['first_name'],
+                    last_name=user_data['last_name'],
+                    is_active=True
+                )
+                db.session.add(user)
+                print(f"✅ Created default user: {user_data['username']}")
+
+        db.session.commit()
+        print("✅ Database initialization completed successfully")
+
+        # Verify database integrity
+        user_count = User.query.count()
+        medication_count = Medication.query.count()
+        print(f"📊 Database status: {user_count} users, {medication_count} medications")
+
+        return True
+
+    except Exception as e:
+        print(f"❌ Database initialization failed: {e}")
+        db.session.rollback()
+        return False
+
+def ensure_database_exists():
+    """Ensure database file exists and is accessible"""
+    try:
+        import os
+        db_path = 'instance/medications.db'
+
+        # Create instance directory if it doesn't exist
+        os.makedirs('instance', exist_ok=True)
+
+        # Check if database file exists
+        if not os.path.exists(db_path):
+            print(f"📁 Creating new database at: {db_path}")
+        else:
+            print(f"📁 Using existing database at: {db_path}")
+
+        return True
+
+    except Exception as e:
+        print(f"❌ Database file check failed: {e}")
+        return False
+
 if __name__ == '__main__':
     with app.app_context():
-        db.create_all()
+        # Ensure database directory and file exist
+        if not ensure_database_exists():
+            print("❌ Failed to ensure database exists. Exiting...")
+            exit(1)
 
-        # Create default user if it doesn't exist
-        if not User.query.filter_by(username='testuser').first():
-            user = User(
-                username='testuser',
-                email='test@example.com',
-                password_hash=generate_password_hash('testpass123'),
-                first_name='Test',
-                last_name='User'
-            )
-            db.session.add(user)
-            db.session.commit()
-            print("Created default test user")
+        # Initialize database with tables and default data
+        if not initialize_database():
+            print("❌ Failed to initialize database. Exiting...")
+            exit(1)
 
     # Start the enhanced reminder service
     print("🔔 Starting active medication reminder service...")
@@ -992,4 +1160,5 @@ if __name__ == '__main__':
     print("🏥 Starting MEDIMORPH application...")
     print("🌐 Access the application at: http://localhost:5000")
     print("🔔 Active medication reminders enabled!")
+    print("💾 Database ready for data storage!")
     socketio.run(app, debug=True, host='127.0.0.1', port=5000)
